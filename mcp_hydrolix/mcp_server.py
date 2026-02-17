@@ -190,7 +190,8 @@ def term(*args, **kwargs):
 
 signal.signal(signal.SIGTERM, term)
 signal.signal(signal.SIGINT, term)
-signal.signal(signal.SIGQUIT, term)
+if hasattr(signal, "SIGQUIT"):
+    signal.signal(signal.SIGQUIT, term)
 
 
 async def execute_query(query: str) -> HdxQueryResult:
