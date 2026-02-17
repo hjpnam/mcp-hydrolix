@@ -56,7 +56,7 @@ class HydrolixConfig:
         HYDROLIX_MCP_MAX_REQUESTS_JITTER 1000
         HYDROLIX_MCP_MAX_KEEPALIVE 10
         HYDROLIX_LIST_TABLES_PAGE_SIZE 50
-        HYDROLIX_QUERY_RESULT_PAGE_SIZE 10000
+        HYDROLIX_QUERY_RESULT_PAGE_SIZE 1000
     """
 
     def __init__(self) -> None:
@@ -269,9 +269,9 @@ class HydrolixConfig:
         paginating through query results. This value must be less than
         or equal to hdx_query_max_result_rows (100,000).
 
-        Default: 10,000 rows per page
+        Default: 1,000 rows per page
         """
-        return int(os.getenv("HYDROLIX_QUERY_RESULT_PAGE_SIZE", "10000"))
+        return int(os.getenv("HYDROLIX_QUERY_RESULT_PAGE_SIZE", "1000"))
 
     def get_client_config(self, request_credential: Optional[HydrolixCredential]) -> dict:
         """

@@ -28,6 +28,7 @@ from mcp_hydrolix.auth import (
     UsernamePassword,
 )
 from mcp_hydrolix.mcp_env import HydrolixConfig, get_config
+from mcp_hydrolix.pagination import decode_cursor, encode_cursor, hash_query, validate_cursor_params
 from mcp_hydrolix.utils import with_serializer
 
 
@@ -551,6 +552,9 @@ async def list_tables(
         - To get next page, pass next_cursor to cursor parameter
         - Loop until next_cursor is None to fetch all tables
 
+        Note: list_tables has consistent ordering (tables returned in deterministic order
+        from system.tables), so pagination results are reliable without explicit ORDER BY.
+
         Example pagination workflow:
             # Get first page
             result = await list_tables('my_database')
@@ -578,9 +582,6 @@ async def list_tables(
         result = await run_select_query("SELECT countMerge(`count()`) FROM akamai.summary LIMIT 100")
     """
     logger.info(f"Listing tables in database '{database}' (cursor={cursor})")
-
-    # Import pagination utilities
-    from mcp_hydrolix.pagination import decode_cursor, encode_cursor, validate_cursor_params
 
     # Decode cursor to get offset
     offset = 0
@@ -785,7 +786,7 @@ SELECT `toStartOfMinute(primary_datetime)` as time_bucket,
 FROM database.summary_table
 GROUP BY `toStartOfMinute(primary_datetime)`
 ORDER BY time_bucket DESC
-LIMIT 10""",
+""",
     }
 
     return ToolResult(
@@ -815,10 +816,12 @@ async def get_pagination_help():
     """
     help_text = {
         "overview": """Cursor-based pagination allows efficient retrieval of large result sets in pages.
-- Default page size: 50 tables (list_tables) or 10,000 rows (run_select_query)
+- Default page size: 50 tables (list_tables) or 1,000 rows (run_select_query)
 - Each response includes an opaque cursor token for fetching the next page
 - Loop through pages by passing the cursor to subsequent calls
-- Stop when next_cursor is None (no more data)""",
+- Stop when next_cursor is None (no more data)
+
+CRITICAL: Always include ORDER BY in your queries to ensure consistent pagination results.""",
         "response_structure": """Paginated responses include these fields:
 
 For list_tables (PaginatedTableList):
@@ -858,25 +861,35 @@ while result['next_cursor']:
     all_rows.extend(result['rows'])
 
 # Now all_rows contains all query results""",
-        "best_practices": """1. ALWAYS include ORDER BY in queries when using pagination
-   - Ensures consistent ordering across pages
-   - Without ORDER BY, row order may change between pages
+        "best_practices": """1. CRITICAL: ALWAYS include ORDER BY in queries when using pagination
+   - Without ORDER BY, database row order is NON-DETERMINISTIC
+   - This causes: duplicate rows across pages, missing rows, inconsistent results
+   - Bad:  SELECT * FROM table WHERE date > '2024-01-01'
+   - Good: SELECT * FROM table WHERE date > '2024-01-01' ORDER BY timestamp, id
+   - The ORDER BY clause is MANDATORY for reliable pagination
 
-2. Check next_cursor field, not has_more
+2. Queries with existing LIMIT/OFFSET (advanced usage)
+   - If your query has LIMIT/OFFSET, pagination operates on your query's RESULT
+   - The offsets are NOT additive on the original table
+   - Example: Query has "LIMIT 1000 OFFSET 500" (rows 500-1499)
+             Page 2 (pagination offset=100) returns rows 600-699, NOT 1500-1599
+   - Your LIMIT/OFFSET defines a "data window", pagination divides that window
+
+3. Check next_cursor field, not has_more
    - Loop while next_cursor is not None
    - has_more is informational only
 
-3. Pass same query/parameters with cursor
+4. Pass same query/parameters with cursor
    - Cursors are tied to specific query parameters
    - Changing query/parameters with existing cursor causes validation error
 
-4. Cursors are opaque tokens
+5. Cursors are opaque tokens
    - Do not parse or modify cursor strings
    - Cursors include validation data to prevent tampering
 
-5. Configuration (environment variables):
+6. Configuration (environment variables):
    - HYDROLIX_LIST_TABLES_PAGE_SIZE=50 (default)
-   - HYDROLIX_QUERY_RESULT_PAGE_SIZE=10000 (default)""",
+   - HYDROLIX_QUERY_RESULT_PAGE_SIZE=1000 (default)""",
     }
 
     return ToolResult(
@@ -891,10 +904,12 @@ while result['next_cursor']:
 
 
 def _add_pagination_to_query(query: str, limit: int, offset: int) -> str:
-    """Add LIMIT and OFFSET to a SQL query.
+    """Add LIMIT and OFFSET to a SQL query using proper SQL parsing.
 
     If the query already contains LIMIT or OFFSET clauses, wraps it in a subquery
-    to apply pagination at the outer level.
+    to apply pagination at the outer level. Uses sqlparse to accurately detect
+    LIMIT/OFFSET keywords, avoiding false positives from table names, column names,
+    or string literals.
 
     Args:
         query: SQL query string
@@ -904,13 +919,37 @@ def _add_pagination_to_query(query: str, limit: int, offset: int) -> str:
     Returns:
         Modified query with LIMIT and OFFSET applied
     """
+    import sqlparse
+
     query = query.strip().rstrip(";")
 
-    # If query already has LIMIT/OFFSET, wrap in subquery
-    if "LIMIT" in query.upper() or "OFFSET" in query.upper():
-        return f"SELECT * FROM ({query}) AS paginated_subquery LIMIT {limit} OFFSET {offset}"
+    # Parse the query to detect LIMIT/OFFSET keywords
+    # This avoids false positives from:
+    # - Table names: SELECT * FROM my_limit_table
+    # - Column names: SELECT offset_value FROM table
+    # - String literals: SELECT 'LIMIT' as keyword FROM table
+    try:
+        parsed = sqlparse.parse(query)
+        if not parsed:
+            # If parsing fails, fall back to simple append
+            return f"{query} LIMIT {limit} OFFSET {offset}"
 
-    # Simple case: append LIMIT/OFFSET
+        # Check if any tokens are LIMIT or OFFSET keywords
+        has_limit_or_offset = any(
+            token.ttype is sqlparse.tokens.Keyword and token.value.upper() in ("LIMIT", "OFFSET")
+            for statement in parsed
+            for token in statement.flatten()
+        )
+
+        if has_limit_or_offset:
+            # Wrap in subquery to apply pagination at outer level
+            return f"SELECT * FROM ({query}) AS paginated_subquery LIMIT {limit} OFFSET {offset}"
+
+    except Exception as e:
+        # If sqlparse fails for any reason, log and fall back to simple append
+        logger.warning(f"Failed to parse query for LIMIT/OFFSET detection: {e}")
+
+    # Simple case: append LIMIT/OFFSET directly (most common and efficient)
     return f"{query} LIMIT {limit} OFFSET {offset}"
 
 
@@ -919,58 +958,62 @@ def _add_pagination_to_query(query: str, limit: int, offset: int) -> str:
 async def run_select_query(query: str, cursor: Optional[str] = None) -> dict[str, Any]:
     """Run a SELECT query in a Hydrolix time-series database using ClickHouse SQL dialect.
 
-    Queries timeout after 30 seconds. Uses cursor-based pagination (10,000 rows/page).
+    ⚠️ MANDATORY PRE-QUERY WORKFLOW - DO NOT SKIP:
 
-    MANDATORY PRE-QUERY CHECK:
-        ALWAYS call get_table_info(database, table_name) FIRST to check if table is a summary table.
-        Summary tables require special -Merge functions. See get_summary_table_query_help() for details.
+        Step 1: CALL get_table_info(database, table_name) FIRST
+                → Returns is_summary_table and column metadata
+                → DO NOT query tables without calling this first
 
-    REQUIRED WORKFLOW:
-        1. Call get_table_info(database, table_name)
-        2. If is_summary_table=True: Call get_summary_table_query_help() for query construction rules
-        3. Build and execute query using this tool
-        4. If next_cursor in response: Call get_pagination_help() for pagination workflow
+        Step 2: IF is_summary_table=True → YOU MUST CALL get_summary_table_query_help()
+                → This is MANDATORY, not optional
+                → Summary tables require special -Merge functions
+                → Queries will FAIL without calling this tool
 
-    Performance Guidelines:
-        - Primary key is always a timestamp
-        - Include LIMIT or timestamp filter as performance guard
-        - Use specific fields, avoid SELECT *
-        - For aggregations: use timestamp filter, or LIMIT in subquery before aggregation
-        - Use prefix/suffix matching: column LIKE 'prefix%' or column LIKE '%suffix'
+        Step 3: Build and execute your query with run_select_query()
 
-    Regular Table Examples:
-        Purpose: get logs from the `application.logs` table. Primary key: `timestamp`.
-        Performance guard: 10 minute recency filter.
+        Step 4: IF next_cursor in response → CALL get_pagination_help()
+                → Shows how to fetch remaining pages
+                → Explains ORDER BY requirement and advanced pagination
 
-        `SELECT message, timestamp FROM application.logs WHERE timestamp > now() - INTERVAL 10 MINUTES`
+    ⚠️ CRITICAL REQUIREMENTS:
 
-        Purpose: get the median humidity from the `weather.measurements` table. Primary
-        key: `date`. Performance guard: 1000 row limit, applied before aggregation.
+        1. ORDER BY is MANDATORY for reliable pagination
+           Without it: duplicate rows, missing rows, inconsistent results
+           Example: ORDER BY timestamp, id
 
-         `SELECT median(humidity) FROM (SELECT humidity FROM weather.measurements LIMIT 1000)`
+        2. Performance guard REQUIRED (use one):
+           - Timestamp filter: WHERE timestamp > now() - INTERVAL 10 MINUTES
+           - Row limit: LIMIT 1000
 
-        Purpose: get the lowest temperature from the `weather.measurements` table over
-        the last 10 years. Primary key: `date`. Performance guard: date range filter.
+        3. Use specific columns, avoid SELECT *
 
-        `SELECT min(temperature) FROM weather.measurements WHERE date > now() - INTERVAL 10 YEARS`
+    Query Examples (Regular Tables Only):
 
-        Purpose: get the app name with the most log messages from the `application.logs`
-        table in the window between new year and valentine's day of 2024. Primary key: `timestamp`.
-        Performance guard: date range filter.
-         `SELECT app, count(*) FROM application.logs WHERE timestamp > '2024-01-01' AND timestamp < '2024-02-14' GROUP BY app ORDER BY count(*) DESC LIMIT 1`
+        Basic query with timestamp filter:
+        SELECT message, timestamp FROM logs.application
+        WHERE timestamp > now() - INTERVAL 10 MINUTES
+        ORDER BY timestamp
 
-    Pagination:
-        Returns PaginatedQueryResult with:
-        - rows, columns: Current page data
-        - next_cursor: Pass to subsequent calls (None when done)
-        - page_size, total_retrieved, has_more: Pagination metadata
+        Aggregation with LIMIT in subquery:
+        SELECT median(humidity) FROM (
+            SELECT humidity FROM weather.measurements ORDER BY date LIMIT 1000
+        )
 
-        Call get_pagination_help() for complete pagination workflow examples.
+        GROUP BY with timestamp filter:
+        SELECT app, count(*) FROM logs.application
+        WHERE timestamp > '2024-01-01' AND timestamp < '2024-02-14'
+        GROUP BY app
+        ORDER BY count(*) DESC
+        LIMIT 1
+
+    Returns:
+        PaginatedQueryResult with rows, columns, next_cursor, page_size, total_retrieved, has_more
+
+    For Summary Tables: CALL get_summary_table_query_help() - DO NOT GUESS THE SYNTAX
+    For Pagination Help: CALL get_pagination_help() when you see next_cursor
+    Timeout: 30 seconds | Page size: 1,000 rows
     """
     logger.info(f"Executing SELECT query: {query} (cursor={cursor})")
-
-    # Import pagination utilities
-    from mcp_hydrolix.pagination import decode_cursor, encode_cursor, hash_query
 
     # Decode cursor to get offset and validate query
     offset = 0

@@ -70,9 +70,17 @@ uv run mcp-hydrolix
 **Critical Feature**: `list_tables` and `run_select_query` tools support cursor-based pagination to handle large result sets efficiently.
 
 **How It Works:**
-- Results are returned in pages (default: 50 tables or 10,000 rows per page)
+- Results are returned in pages (default: 50 tables or 1,000 rows per page)
 - Each response includes a `next_cursor` field (opaque token) if more data exists
 - Clients loop by passing the cursor to subsequent calls until `next_cursor` is None
+
+**CRITICAL - ORDER BY Requirement:**
+- **ALWAYS include ORDER BY in queries when using pagination**
+- Without ORDER BY, row order is non-deterministic causing:
+  - Duplicate rows across pages
+  - Missing rows between pages
+  - Inconsistent results on repeated calls
+- Example: `SELECT * FROM table WHERE date > '2024-01-01' ORDER BY timestamp, id`
 
 **Tool Behavior:**
 - `list_tables(database)` → Returns `PaginatedTableList` with `tables`, `next_cursor`, `page_size`, `total_retrieved`
@@ -81,7 +89,13 @@ uv run mcp-hydrolix
 
 **Configuration:**
 - `HYDROLIX_LIST_TABLES_PAGE_SIZE=50` (default)
-- `HYDROLIX_QUERY_RESULT_PAGE_SIZE=10000` (default)
+- `HYDROLIX_QUERY_RESULT_PAGE_SIZE=1000` (default)
+
+**Queries with LIMIT/OFFSET (Advanced):**
+If your query already contains LIMIT/OFFSET, pagination operates on the RESULT of your query, not the original table. The offsets are NOT additive.
+- Example: Query has `LIMIT 1000 OFFSET 500` (rows 500-1499 from table)
+- Page 2 (pagination offset=100) returns rows 600-699 from table, NOT 1500-1599
+- Your LIMIT/OFFSET defines a "data window", pagination divides that window into pages
 
 **Implementation Details:**
 - Cursors are base64-encoded JSON with offset and validation data
@@ -92,9 +106,10 @@ uv run mcp-hydrolix
 **Security:** Cursor validation prevents parameter tampering and query switching attacks.
 
 **For LLMs/Clients:** Tool docstrings include complete pagination workflow examples showing how to:
-1. Check for `next_cursor` in response
-2. Loop until `next_cursor` is None
-3. Pass cursor to subsequent calls
+1. Always include ORDER BY in queries for consistent results
+2. Check for `next_cursor` in response
+3. Loop until `next_cursor` is None
+4. Pass cursor to subsequent calls
 
 ## Important Patterns
 

@@ -218,10 +218,10 @@ class TestRunSelectQueryPagination:
         assert "total_retrieved" in result
         assert "has_more" in result
 
-        # Should return first page (10,000 rows)
-        assert len(result["rows"]) == 10000
-        assert result["page_size"] == 10000
-        assert result["total_retrieved"] == 10000
+        # Should return first page (1,000 rows)
+        assert len(result["rows"]) == 1000
+        assert result["page_size"] == 1000
+        assert result["total_retrieved"] == 1000
         assert result["has_more"] is True
         assert result["next_cursor"] is not None
 
@@ -247,7 +247,7 @@ class TestRunSelectQueryPagination:
 
         # Should have retrieved all rows
         assert len(all_rows) == total_rows
-        assert page_count == 3  # 25,000 rows / 10,000 per page = 3 pages
+        assert page_count == 25  # 25,000 rows / 1,000 per page = 25 pages
 
         # Verify ordering is maintained
         assert all_rows[0][0] == 0
@@ -270,9 +270,9 @@ class TestRunSelectQueryPagination:
             if not cursor:
                 break
 
-        # Last page should have 5,000 rows (25,000 % 10,000 = 5,000)
+        # Last page should have 0 rows (25,000 % 1,000 = 0, i.e., exact pages)
         last_page = pages[-1]
-        assert last_page["page_size"] == 5000
+        assert last_page["page_size"] == 1000
         assert last_page["has_more"] is False
         assert last_page["next_cursor"] is None
         assert last_page["total_retrieved"] == total_rows
@@ -311,8 +311,8 @@ class TestRunSelectQueryPagination:
 
         result = await run_select_query_fn(query)
 
-        # Should still paginate to 10,000 rows per page
-        assert len(result["rows"]) == 10000
+        # Should still paginate to 1,000 rows per page
+        assert len(result["rows"]) == 1000
         assert result["has_more"] is True
 
     @pytest.mark.asyncio
