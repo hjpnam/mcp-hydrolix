@@ -907,7 +907,7 @@ def _add_pagination_to_query(query: str, limit: int, offset: int) -> str:
     """Add LIMIT and OFFSET to a SQL query using proper SQL parsing.
 
     If the query already contains LIMIT or OFFSET clauses, wraps it in a subquery
-    to apply pagination at the outer level. Uses sqlparse to accurately detect
+    to apply pagination at the outer level. Uses sqlglot to accurately detect
     LIMIT/OFFSET keywords, avoiding false positives from table names, column names,
     or string literals.
 
@@ -919,7 +919,7 @@ def _add_pagination_to_query(query: str, limit: int, offset: int) -> str:
     Returns:
         Modified query with LIMIT and OFFSET applied
     """
-    import sqlparse
+    import sqlglot
 
     query = query.strip().rstrip(";")
 
@@ -929,24 +929,18 @@ def _add_pagination_to_query(query: str, limit: int, offset: int) -> str:
     # - Column names: SELECT offset_value FROM table
     # - String literals: SELECT 'LIMIT' as keyword FROM table
     try:
-        parsed = sqlparse.parse(query)
-        if not parsed:
-            # If parsing fails, fall back to simple append
-            return f"{query} LIMIT {limit} OFFSET {offset}"
+        parsed = sqlglot.parse_one(query, read="clickhouse")
 
-        # Check if any tokens are LIMIT or OFFSET keywords
-        has_limit_or_offset = any(
-            token.ttype is sqlparse.tokens.Keyword and token.value.upper() in ("LIMIT", "OFFSET")
-            for statement in parsed
-            for token in statement.flatten()
-        )
+        # Check if query has LIMIT or OFFSET clauses
+        has_limit = parsed.find(sqlglot.exp.Limit) is not None
+        has_offset = parsed.find(sqlglot.exp.Offset) is not None
 
-        if has_limit_or_offset:
+        if has_limit or has_offset:
             # Wrap in subquery to apply pagination at outer level
             return f"SELECT * FROM ({query}) AS paginated_subquery LIMIT {limit} OFFSET {offset}"
 
     except Exception as e:
-        # If sqlparse fails for any reason, log and fall back to simple append
+        # If sqlglot fails for any reason, log and fall back to simple append
         logger.warning(f"Failed to parse query for LIMIT/OFFSET detection: {e}")
 
     # Simple case: append LIMIT/OFFSET directly (most common and efficient)
