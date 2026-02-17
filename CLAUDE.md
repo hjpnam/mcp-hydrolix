@@ -75,14 +75,13 @@ uv run mcp-hydrolix
 - Clients loop by passing the cursor to subsequent calls until `next_cursor` is None
 
 **Tool Behavior:**
-- `list_tables(database, paginate=True)` → Returns `PaginatedTableList` with `tables`, `next_cursor`, `page_size`, `total_retrieved`
-- `run_select_query(query, paginate=True)` → Returns `PaginatedQueryResult` with `rows`, `columns`, `next_cursor`, `has_more`
-- Set `paginate=False` for legacy behavior (returns all data in single response)
+- `list_tables(database)` → Returns `PaginatedTableList` with `tables`, `next_cursor`, `page_size`, `total_retrieved`
+- `run_select_query(query)` → Returns `PaginatedQueryResult` with `rows`, `columns`, `next_cursor`, `has_more`
+- Both tools always return paginated responses for consistency and performance
 
 **Configuration:**
 - `HYDROLIX_LIST_TABLES_PAGE_SIZE=50` (default)
 - `HYDROLIX_QUERY_RESULT_PAGE_SIZE=10000` (default)
-- `HYDROLIX_ENABLE_PAGINATION=true` (default)
 
 **Implementation Details:**
 - Cursors are base64-encoded JSON with offset and validation data
@@ -96,7 +95,6 @@ uv run mcp-hydrolix
 1. Check for `next_cursor` in response
 2. Loop until `next_cursor` is None
 3. Pass cursor to subsequent calls
-4. Handle both paginated and non-paginated modes
 
 ## Important Patterns
 
