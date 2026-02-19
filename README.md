@@ -24,6 +24,16 @@ An MCP server for Hydrolix.
   * Input: `database` (string): The name of the database.
   * Input: `table` (string): The name of the table.
 
+* `get_summary_table_query_help`
+  * Get detailed instructions for querying summary tables with pre-aggregated data
+  * Returns comprehensive documentation on -Merge functions and query patterns
+  * Call this when `get_table_info` returns `is_summary_table=True`
+
+* `get_pagination_help`
+  * Get detailed instructions for handling paginated responses
+  * Returns documentation on cursor-based pagination workflow
+  * Call this when tool responses include `next_cursor` field
+
 ## Effective Usage
 
 Due to the wide variety in LLM architectures, not all models will proactively use the tools above, and few will use them effectively without guidance, even with the carefully-constructed tool descriptions provided to the model. To get the best results out of your model while using the Hydrolix MCP server, we recommend the following:

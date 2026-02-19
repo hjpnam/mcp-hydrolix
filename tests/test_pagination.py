@@ -5,11 +5,9 @@ import base64
 import pytest
 
 from mcp_hydrolix.pagination import (
-    CursorData,
-    decode_cursor,
-    encode_cursor,
+    QueryResultCursor,
+    TableListCursor,
     hash_query,
-    validate_cursor_params,
 )
 
 
@@ -17,36 +15,32 @@ class TestCursorEncoding:
     """Tests for cursor encoding and decoding."""
 
     @pytest.mark.parametrize(
-        "cursor_data",
+        "cursor_obj",
         [
-            # Typical cursor with params
-            {
-                "type": "table_list",
-                "offset": 50,
-                "params": {"database": "test", "like": "%.log"},
-            },
-            # All fields included
-            {
-                "type": "query_result",
-                "offset": 100,
-                "params": {"database": "mydb", "like": None, "not_like": "tmp%"},
-                "query_hash": "abc123def456",
-            },
+            # Table list cursor
+            TableListCursor(offset=50, database="test"),
+            # Query result cursor
+            QueryResultCursor(offset=100, query_hash="abc123def456"),
             # Minimal cursor
-            {"type": "table_list", "offset": 0},
+            TableListCursor(offset=0, database="mydb"),
         ],
-        ids=["typical", "all_fields", "minimal"],
+        ids=["table_list", "query_result", "minimal"],
     )
-    def test_cursor_encoding_roundtrip(self, cursor_data: CursorData):
+    def test_cursor_encoding_roundtrip(self, cursor_obj):
         """Test cursor can be encoded and decoded."""
-        cursor = encode_cursor(cursor_data)
-        decoded = decode_cursor(cursor)
-        assert decoded == cursor_data
+        cursor = cursor_obj.encode()
+        # Use type-specific decode
+        if isinstance(cursor_obj, TableListCursor):
+            decoded = TableListCursor.decode(cursor)
+        else:
+            decoded = QueryResultCursor.decode(cursor)
+        assert decoded.offset == cursor_obj.offset
+        assert isinstance(decoded, type(cursor_obj))
 
     def test_encoded_cursor_is_url_safe(self):
         """Test that encoded cursor uses URL-safe base64."""
-        data: CursorData = {"type": "table_list", "offset": 50}
-        cursor = encode_cursor(data)
+        cursor_obj = TableListCursor(offset=50, database="test")
+        cursor = cursor_obj.encode()
         # URL-safe base64 should not contain + or /
         assert "+" not in cursor.rstrip("=")
         assert "/" not in cursor.rstrip("=")
@@ -64,7 +58,9 @@ class TestCursorEncoding:
     def test_invalid_cursor_raises_error(self, invalid_cursor: str, description: str):
         """Test various invalid cursors raise ValueError."""
         with pytest.raises(ValueError):
-            decode_cursor(invalid_cursor)
+            TableListCursor.decode(invalid_cursor)
+        with pytest.raises(ValueError):
+            QueryResultCursor.decode(invalid_cursor)
 
 
 class TestQueryHashing:
@@ -117,67 +113,50 @@ class TestCursorParameterValidation:
     """Tests for cursor parameter validation."""
 
     @pytest.mark.parametrize(
-        "cursor_params,expected_params",
-        [
-            # Exact match
-            (
-                {"database": "test", "like": "%.log", "not_like": None},
-                {"database": "test", "like": "%.log", "not_like": None},
-            ),
-            # Empty params
-            ({}, {}),
-            # Subset validation (only validates expected keys)
-            (
-                {"database": "test", "like": "%.log", "extra": "value"},
-                {"database": "test"},
-            ),
-            # None values
-            (
-                {"database": "test", "like": None, "not_like": None},
-                {"database": "test", "like": None, "not_like": None},
-            ),
-        ],
-        ids=["exact_match", "empty", "subset", "with_none"],
+        "database",
+        ["test", "prod", "mydb"],
+        ids=["test", "prod", "mydb"],
     )
-    def test_validate_cursor_params_success(self, cursor_params: dict, expected_params: dict):
-        """Test validation passes with matching params."""
-        cursor_data: CursorData = {"params": cursor_params}
-        validate_cursor_params(cursor_data, expected_params)  # Should not raise
+    def test_validate_table_list_cursor_success(self, database: str):
+        """Test validation passes with matching database."""
+        cursor = TableListCursor(offset=50, database=database)
+        cursor.validate_params(database)  # Should not raise
 
     @pytest.mark.parametrize(
-        "cursor_params,expected_params,description",
+        "cursor_database,expected_database",
         [
-            # Different value
-            ({"database": "test1"}, {"database": "test2"}, "different value"),
-            # Missing param
-            ({"like": "%.log"}, {"database": "test"}, "missing param"),
-            # None vs value
-            ({"like": None}, {"like": "%.log"}, "none vs value"),
-            # Value vs None
-            ({"like": "%.log"}, {"like": None}, "value vs none"),
-            # Multiple mismatches
-            (
-                {"database": "test1", "like": "%.txt"},
-                {"database": "test2", "like": "%.log"},
-                "multiple mismatches",
-            ),
+            ("test", "prod"),
+            ("mydb", "test"),
+            ("database1", "database2"),
         ],
-        ids=["different_value", "missing_param", "none_vs_value", "value_vs_none", "multiple"],
+        ids=["test_vs_prod", "mydb_vs_test", "db1_vs_db2"],
     )
-    def test_validate_cursor_params_failure(
-        self, cursor_params: dict, expected_params: dict, description: str
-    ):
-        """Test validation fails with mismatched params."""
-        cursor_data: CursorData = {"params": cursor_params}
-        with pytest.raises(ValueError, match="Cursor parameter mismatch"):
-            validate_cursor_params(cursor_data, expected_params)
+    def test_validate_table_list_cursor_failure(self, cursor_database: str, expected_database: str):
+        """Test validation fails with mismatched database."""
+        cursor = TableListCursor(offset=50, database=cursor_database)
+        with pytest.raises(ValueError, match="Cursor database mismatch"):
+            cursor.validate_params(expected_database)
 
-    def test_validate_cursor_params_no_params_field(self):
-        """Test validation when cursor has no params field."""
-        cursor_data: CursorData = {"type": "table_list", "offset": 50}
-        expected = {"database": "test"}
-        with pytest.raises(ValueError, match="Cursor parameter mismatch"):
-            validate_cursor_params(cursor_data, expected)
+    def test_validate_query_result_cursor_success(self):
+        """Test query validation passes with same query."""
+        query = "SELECT * FROM table"
+        cursor = QueryResultCursor(offset=100, query_hash=hash_query(query))
+        cursor.validate_query(query)  # Should not raise
+
+    @pytest.mark.parametrize(
+        "original_query,different_query",
+        [
+            ("SELECT * FROM table1", "SELECT * FROM table2"),
+            ("SELECT * FROM users", "SELECT * FROM admin_users"),
+            ("SELECT id FROM test", "SELECT name FROM test"),
+        ],
+        ids=["different_table", "different_table2", "different_column"],
+    )
+    def test_validate_query_result_cursor_failure(self, original_query: str, different_query: str):
+        """Test validation fails when query changes."""
+        cursor = QueryResultCursor(offset=100, query_hash=hash_query(original_query))
+        with pytest.raises(ValueError, match="Query has changed"):
+            cursor.validate_query(different_query)
 
 
 class TestCursorDataIntegration:
@@ -186,79 +165,69 @@ class TestCursorDataIntegration:
     def test_full_cursor_workflow(self):
         """Test complete cursor workflow: create, encode, decode, validate."""
         # Create cursor
-        original_data: CursorData = {
-            "type": "table_list",
-            "offset": 50,
-            "params": {"database": "prod", "like": "events_%", "not_like": None},
-        }
+        cursor = TableListCursor(offset=50, database="prod")
 
         # Encode
-        cursor_string = encode_cursor(original_data)
+        cursor_string = cursor.encode()
 
         # Decode
-        decoded_data = decode_cursor(cursor_string)
+        decoded = TableListCursor.decode(cursor_string)
 
         # Validate structure
-        assert decoded_data["type"] == "table_list"
-        assert decoded_data["offset"] == 50
+        assert isinstance(decoded, TableListCursor)
+        assert decoded.offset == 50
+        assert decoded.database == "prod"
 
         # Validate params
-        expected_params = {"database": "prod", "like": "events_%", "not_like": None}
-        validate_cursor_params(decoded_data, expected_params)
+        decoded.validate_params("prod")  # Should not raise
 
     def test_query_result_cursor_workflow(self):
         """Test cursor workflow for query results with hash."""
         query = "SELECT * FROM large_table ORDER BY timestamp"
         query_hash_value = hash_query(query)
 
-        original_data: CursorData = {
-            "type": "query_result",
-            "offset": 10000,
-            "params": {},
-            "query_hash": query_hash_value,
-        }
+        # Create cursor
+        cursor = QueryResultCursor(offset=10000, query_hash=query_hash_value)
 
         # Encode and decode
-        cursor_string = encode_cursor(original_data)
-        decoded_data = decode_cursor(cursor_string)
+        cursor_string = cursor.encode()
+        decoded = QueryResultCursor.decode(cursor_string)
 
-        # Verify hash matches
-        assert decoded_data["query_hash"] == query_hash_value
-        assert decoded_data["query_hash"] == hash_query(query)
+        # Verify structure
+        assert isinstance(decoded, QueryResultCursor)
+        assert decoded.offset == 10000
+        assert decoded.query_hash == query_hash_value
+        assert decoded.query_hash == hash_query(query)
 
         # Verify hash changes if query changes
         different_query = "SELECT * FROM large_table ORDER BY id"
-        assert decoded_data["query_hash"] != hash_query(different_query)
+        assert decoded.query_hash != hash_query(different_query)
 
     def test_cursor_prevents_parameter_change_attack(self):
         """Test cursor validation prevents parameter tampering."""
         # Create cursor for database "test"
-        cursor_data: CursorData = {
-            "type": "table_list",
-            "offset": 50,
-            "params": {"database": "test"},
-        }
-        cursor = encode_cursor(cursor_data)
+        cursor = TableListCursor(offset=50, database="test")
+        cursor_string = cursor.encode()
 
         # Attacker tries to use cursor with different database
-        decoded = decode_cursor(cursor)
-        with pytest.raises(ValueError, match="Cursor parameter mismatch"):
-            validate_cursor_params(decoded, {"database": "prod"})
+        decoded = TableListCursor.decode(cursor_string)
+        assert isinstance(decoded, TableListCursor)
+        with pytest.raises(ValueError, match="Cursor database mismatch"):
+            decoded.validate_params("prod")
 
     def test_cursor_prevents_query_change_attack(self):
         """Test cursor validation prevents query tampering."""
         # Create cursor for specific query
         original_query = "SELECT * FROM users"
-        cursor_data: CursorData = {
-            "type": "query_result",
-            "offset": 100,
-            "query_hash": hash_query(original_query),
-        }
-        cursor = encode_cursor(cursor_data)
+        cursor = QueryResultCursor(offset=100, query_hash=hash_query(original_query))
+        cursor_string = cursor.encode()
 
         # Attacker tries to use cursor with different query
-        decoded = decode_cursor(cursor)
+        decoded = QueryResultCursor.decode(cursor_string)
+        assert isinstance(decoded, QueryResultCursor)
         different_query = "SELECT * FROM admin_users"
 
         # Validation should fail
-        assert decoded["query_hash"] != hash_query(different_query)
+        assert decoded.query_hash != hash_query(different_query)
+        with pytest.raises(ValueError, match="Query has changed"):
+            decoded.validate_query(different_query)

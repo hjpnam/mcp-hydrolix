@@ -1,7 +1,7 @@
 import inspect
 import ipaddress
 import json
-from datetime import datetime, time, date
+from datetime import date, datetime, time
 from decimal import Decimal
 from functools import wraps
 
@@ -35,7 +35,7 @@ def with_serializer(fn):
     """
 
     @wraps(fn)
-    def wrapper(*args, **kwargs):
+    def wrapper(*args, **kwargs) -> ToolResult:
         """
         Sync wrapper of mcpt tool `fn` function.
         Function should return a dict or None.
@@ -49,7 +49,7 @@ def with_serializer(fn):
         return ToolResult(content=enc, structured_content=json.loads(enc))
 
     @wraps(fn)
-    async def async_wrapper(*args, **kwargs):
+    async def async_wrapper(*args, **kwargs) -> ToolResult:
         """
         Async wrapper of mcp tool `fn` function.
         Function should return a dict or None.

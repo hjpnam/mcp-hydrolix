@@ -28,7 +28,7 @@ from mcp_hydrolix.auth import (
     UsernamePassword,
 )
 from mcp_hydrolix.mcp_env import HydrolixConfig, get_config
-from mcp_hydrolix.pagination import decode_cursor, encode_cursor, hash_query, validate_cursor_params
+from mcp_hydrolix.pagination import QueryResultCursor, TableListCursor, hash_query
 from mcp_hydrolix.utils import with_serializer
 
 
@@ -217,7 +217,13 @@ async def execute_query(query: str) -> HdxQueryResult:
         raise ToolError(f"Query execution failed: {str(err)}")
 
 
-async def execute_cmd(query: str):
+async def execute_cmd(query: str) -> Any:
+    """Execute a ClickHouse command that returns a simple result (not a full query result set).
+
+    Returns:
+        Command result - typically a string for commands like SHOW DATABASES,
+        or other types depending on the command.
+    """
     try:
         async with await create_hydrolix_client(
             client_shared_pool, get_request_credential()
@@ -248,7 +254,16 @@ async def health_check(request: Request) -> PlainTextResponse:
         return PlainTextResponse(f"ERROR - Cannot connect to Hydrolix: {str(e)}", status_code=503)
 
 
-def result_to_table(query_columns, result) -> List[Table]:
+def result_to_table(query_columns: List[str], result: List[List[Any]]) -> List[Table]:
+    """Convert query results to Table objects.
+
+    Args:
+        query_columns: Column names from the query
+        result: Rows of data from the query
+
+    Returns:
+        List of Table objects
+    """
     return [Table(**dict(zip(query_columns, row))) for row in result]
 
 
@@ -432,11 +447,9 @@ async def list_databases() -> List[str]:
     logger.info("Listing all databases")
     result = await execute_cmd("SHOW DATABASES")
 
-    # Convert newline-separated string to list and trim whitespace
-    if isinstance(result, str):
-        databases = [db.strip() for db in result.strip().split("\n")]
-    else:
-        databases = [result]
+    # SHOW DATABASES returns a newline-separated string
+    # Convert to list and trim whitespace
+    databases = [db.strip() for db in str(result).strip().split("\n")]
 
     logger.info(f"Found {len(databases)} databases")
     return databases
@@ -588,11 +601,9 @@ async def list_tables(
     offset = 0
     if cursor:
         try:
-            cursor_data = decode_cursor(cursor)
-            validate_cursor_params(
-                cursor_data, {"database": database, "like": like, "not_like": not_like}
-            )
-            offset = cursor_data.get("offset", 0)
+            cursor_data = TableListCursor.decode(cursor)
+            cursor_data.validate_params(database)
+            offset = cursor_data.offset
         except Exception as e:
             raise ToolError(f"Invalid cursor: {str(e)}")
 
@@ -631,12 +642,8 @@ async def list_tables(
     # Generate next cursor if more data exists
     next_cursor = None
     if has_more:
-        next_cursor_data = {
-            "type": "table_list",
-            "offset": offset + page_size,
-            "params": {"database": database, "like": like, "not_like": not_like},
-        }
-        next_cursor = encode_cursor(next_cursor_data)
+        next_cursor_obj = TableListCursor(offset=offset + page_size, database=database)
+        next_cursor = next_cursor_obj.encode()
 
     return PaginatedTableList(
         tables=tables,
@@ -967,8 +974,8 @@ async def run_select_query(query: str, cursor: Optional[str] = None) -> dict[str
         Step 3: Build and execute your query with run_select_query()
 
         Step 4: IF next_cursor in response → CALL get_pagination_help()
-                → Shows how to fetch remaining pages
-                → Explains ORDER BY requirement and advanced pagination
+                → Shows complete workflow for fetching remaining pages
+                → Explains ORDER BY requirement and cursor handling
 
     ⚠️ CRITICAL REQUIREMENTS:
 
@@ -1014,12 +1021,9 @@ async def run_select_query(query: str, cursor: Optional[str] = None) -> dict[str
     offset = 0
     if cursor:
         try:
-            cursor_data = decode_cursor(cursor)
-            # Validate query hasn't changed
-            expected_hash = hash_query(query)
-            if cursor_data.get("query_hash") != expected_hash:
-                raise ValueError("Query has changed since cursor was generated")
-            offset = cursor_data.get("offset", 0)
+            cursor_data = QueryResultCursor.decode(cursor)
+            cursor_data.validate_query(query)
+            offset = cursor_data.offset
         except Exception as e:
             raise ToolError(f"Invalid cursor: {str(e)}")
 
@@ -1044,12 +1048,10 @@ async def run_select_query(query: str, cursor: Optional[str] = None) -> dict[str
         # Generate next cursor if more data exists
         next_cursor = None
         if has_more:
-            next_cursor_data = {
-                "type": "query_result",
-                "offset": offset + page_size,
-                "query_hash": hash_query(query),
-            }
-            next_cursor = encode_cursor(next_cursor_data)
+            next_cursor_obj = QueryResultCursor(
+                offset=offset + page_size, query_hash=hash_query(query)
+            )
+            next_cursor = next_cursor_obj.encode()
 
         return PaginatedQueryResult(
             columns=columns,

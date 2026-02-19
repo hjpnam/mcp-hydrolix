@@ -172,17 +172,17 @@ class TestListTablesPagination:
 
     @pytest.mark.asyncio
     async def test_list_tables_cursor_parameter_mismatch(self, setup_pagination_test_database):
-        """Test cursor from different parameters is rejected."""
+        """Test cursor from different database is rejected."""
         test_db, _ = setup_pagination_test_database
 
-        # Get cursor with LIKE filter
-        result1 = await list_tables_fn(database=test_db, like="test_table_0%")
+        # Get cursor for one database
+        result1 = await list_tables_fn(database=test_db)
         cursor = result1["next_cursor"]
 
         if cursor:  # Only test if cursor was generated
-            # Try to use cursor without LIKE filter (parameter mismatch)
-            with pytest.raises(Exception, match="Cursor parameter mismatch|Invalid cursor"):
-                await list_tables_fn(database=test_db, cursor=cursor)
+            # Try to use cursor with different database (parameter mismatch)
+            with pytest.raises(Exception, match="Cursor database mismatch|Invalid cursor"):
+                await list_tables_fn(database="different_db", cursor=cursor)
 
     @pytest.mark.asyncio
     async def test_list_tables_each_table_has_empty_columns(self, setup_pagination_test_database):
@@ -363,16 +363,13 @@ class TestPaginationEdgeCases:
         cursor = result.get("next_cursor")
 
         if cursor:
-            from mcp_hydrolix.pagination import decode_cursor
+            from mcp_hydrolix.pagination import TableListCursor
 
-            cursor_data = decode_cursor(cursor)
+            cursor_data = TableListCursor.decode(cursor)
 
-            assert "type" in cursor_data
-            assert cursor_data["type"] == "table_list"
-            assert "offset" in cursor_data
-            assert cursor_data["offset"] == 50  # Second page starts at 50
-            assert "params" in cursor_data
-            assert cursor_data["params"]["database"] == test_db
+            assert isinstance(cursor_data, TableListCursor)
+            assert cursor_data.offset == 50  # Second page starts at 50
+            assert cursor_data.database == test_db
 
     @pytest.mark.asyncio
     async def test_query_cursor_includes_hash(self, setup_large_query_result):
@@ -384,9 +381,9 @@ class TestPaginationEdgeCases:
         cursor = result.get("next_cursor")
 
         if cursor:
-            from mcp_hydrolix.pagination import decode_cursor, hash_query
+            from mcp_hydrolix.pagination import QueryResultCursor, hash_query
 
-            cursor_data = decode_cursor(cursor)
+            cursor_data = QueryResultCursor.decode(cursor)
 
-            assert "query_hash" in cursor_data
-            assert cursor_data["query_hash"] == hash_query(query)
+            assert isinstance(cursor_data, QueryResultCursor)
+            assert cursor_data.query_hash == hash_query(query)

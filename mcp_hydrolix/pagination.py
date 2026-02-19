@@ -3,63 +3,146 @@
 import base64
 import hashlib
 import json
-from typing import Any, TypedDict
+from dataclasses import dataclass
 
 
-class CursorData(TypedDict, total=False):
-    """Structure of cursor data.
+@dataclass
+class BaseCursorData:
+    """Base class for cursor data.
 
     Attributes:
-        type: Type of cursor ('table_list' or 'query_result')
         offset: Current offset in the result set
-        params: Original request parameters for validation
-        query_hash: SHA256 hash of query for validation (query_result only)
     """
 
-    type: str
     offset: int
-    params: dict[str, Any]
-    query_hash: str
+
+    def encode(self) -> str:
+        """Encode cursor to base64 string.
+
+        Returns:
+            Base64-encoded JSON string (URL-safe)
+
+        Example:
+            >>> cursor = TableListCursor(offset=50, database="test")
+            >>> cursor.encode()
+            'eyJkYXRhYmFzZSI6InRlc3QiLCJvZmZzZXQiOjUwfQ=='
+        """
+        # Convert dataclass to dict, excluding None values
+        cursor_dict = {k: v for k, v in self.__dict__.items() if v is not None}
+        json_str = json.dumps(cursor_dict, sort_keys=True)
+        return base64.urlsafe_b64encode(json_str.encode()).decode()
 
 
-def encode_cursor(cursor_data: CursorData) -> str:
-    """Encode cursor data to opaque string.
+@dataclass
+class TableListCursor(BaseCursorData):
+    """Cursor for list_tables pagination.
 
-    Args:
-        cursor_data: Dictionary with cursor state
-
-    Returns:
-        Base64-encoded JSON string (URL-safe)
-
-    Example:
-        >>> encode_cursor({"type": "table_list", "offset": 50})
-        'eyJvZmZzZXQiOjUwLCJ0eXBlIjoidGFibGVfbGlzdCJ9'
+    Attributes:
+        offset: Current offset in the result set
+        database: Database name for validation
     """
-    json_str = json.dumps(cursor_data, sort_keys=True)
-    return base64.urlsafe_b64encode(json_str.encode()).decode()
+
+    database: str = ""
+
+    @classmethod
+    def decode(cls, cursor: str) -> "TableListCursor":
+        """Decode cursor string to TableListCursor.
+
+        Args:
+            cursor: Opaque cursor string from previous list_tables response
+
+        Returns:
+            TableListCursor instance
+
+        Raises:
+            ValueError: If cursor is invalid or malformed
+
+        Example:
+            >>> cursor_str = 'eyJkYXRhYmFzZSI6InRlc3QiLCJvZmZzZXQiOjUwfQ=='
+            >>> cursor_obj = TableListCursor.decode(cursor_str)
+            >>> cursor_obj.database
+            'test'
+        """
+        try:
+            json_str = base64.urlsafe_b64decode(cursor.encode()).decode()
+            data = json.loads(json_str)
+            return cls(**data)
+        except Exception as e:
+            raise ValueError(f"Invalid TableListCursor format: {str(e)}")
+
+    def validate_params(self, database: str) -> None:
+        """Validate cursor matches request parameters.
+
+        Args:
+            database: Expected database name
+
+        Raises:
+            ValueError: If parameters don't match
+
+        Example:
+            >>> cursor = TableListCursor(offset=50, database="test")
+            >>> cursor.validate_params("test")  # OK
+            >>> cursor.validate_params("prod")  # Raises ValueError
+        """
+        if self.database != database:
+            raise ValueError(f"Cursor database mismatch: {self.database} != {database}")
 
 
-def decode_cursor(cursor: str) -> CursorData:
-    """Decode cursor string to data dictionary.
+@dataclass
+class QueryResultCursor(BaseCursorData):
+    """Cursor for run_select_query pagination.
 
-    Args:
-        cursor: Opaque cursor string from previous response
-
-    Returns:
-        Dictionary with cursor state
-
-    Raises:
-        ValueError: If cursor is invalid or malformed
-
-    Example:
-        >>> decode_cursor('eyJvZmZzZXQiOjUwLCJ0eXBlIjoidGFibGVfbGlzdCJ9')
-        {'offset': 50, 'type': 'table_list'}
+    Attributes:
+        offset: Current offset in the result set
+        query_hash: SHA256 hash of query for validation
     """
-    try:
-        json_str = base64.urlsafe_b64decode(cursor.encode()).decode()
-        return json.loads(json_str)
-    except Exception as e:
-        raise ValueError(f"Invalid cursor format: {str(e)}")
+
+    query_hash: str = ""
+
+    @classmethod
+    def decode(cls, cursor: str) -> "QueryResultCursor":
+        """Decode cursor string to QueryResultCursor.
+
+        Args:
+            cursor: Opaque cursor string from previous run_select_query response
+
+        Returns:
+            QueryResultCursor instance
+
+        Raises:
+            ValueError: If cursor is invalid or malformed
+
+        Example:
+            >>> cursor_str = 'eyJvZmZzZXQiOjEwMCwicXVlcnlfaGFzaCI6ImFiYzEyMyJ9'
+            >>> cursor_obj = QueryResultCursor.decode(cursor_str)
+            >>> cursor_obj.offset
+            100
+        """
+        try:
+            json_str = base64.urlsafe_b64decode(cursor.encode()).decode()
+            data = json.loads(json_str)
+            return cls(**data)
+        except Exception as e:
+            raise ValueError(f"Invalid QueryResultCursor format: {str(e)}")
+
+    def validate_query(self, query: str) -> None:
+        """Validate cursor matches query.
+
+        Args:
+            query: SQL query string to validate against
+
+        Raises:
+            ValueError: If query has changed
+
+        Example:
+            >>> query = "SELECT * FROM table"
+            >>> cursor = QueryResultCursor(offset=100, query_hash=hash_query(query))
+            >>> cursor.validate_query(query)  # OK
+            >>> cursor.validate_query("SELECT * FROM other")  # Raises ValueError
+        """
+        expected_hash = hash_query(query)
+        if self.query_hash != expected_hash:
+            raise ValueError("Query has changed since cursor was generated")
 
 
 def hash_query(query: str) -> str:
@@ -68,8 +151,13 @@ def hash_query(query: str) -> str:
     Strips leading/trailing whitespace before hashing to ensure
     queries that differ only in whitespace produce the same hash.
 
+    NOTE: This hashes the original query WITHOUT pagination LIMIT/OFFSET.
+    The OFFSET is stored separately in the cursor and is intentionally
+    NOT part of the hash. This allows the same query to be paginated
+    across multiple requests while preventing query-switching attacks.
+
     Args:
-        query: SQL query string
+        query: SQL query string (without pagination LIMIT/OFFSET)
 
     Returns:
         SHA256 hash as hex string
@@ -79,30 +167,3 @@ def hash_query(query: str) -> str:
         'a3b2c1...'
     """
     return hashlib.sha256(query.strip().encode()).hexdigest()
-
-
-def validate_cursor_params(cursor_data: CursorData, expected_params: dict[str, Any]) -> None:
-    """Validate cursor parameters match expected values.
-
-    Ensures that the cursor is being used with the same parameters
-    as when it was created, preventing cursor reuse across different queries.
-
-    Args:
-        cursor_data: Decoded cursor data
-        expected_params: Expected parameter values
-
-    Raises:
-        ValueError: If parameters don't match
-
-    Example:
-        >>> cursor = {"params": {"database": "test"}}
-        >>> validate_cursor_params(cursor, {"database": "test"})  # OK
-        >>> validate_cursor_params(cursor, {"database": "prod"})  # Raises ValueError
-    """
-    cursor_params = cursor_data.get("params", {})
-    for key, expected_value in expected_params.items():
-        if cursor_params.get(key) != expected_value:
-            raise ValueError(
-                f"Cursor parameter mismatch: {key}={cursor_params.get(key)} "
-                f"(expected {expected_value})"
-            )
